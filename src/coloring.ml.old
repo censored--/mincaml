@@ -1,0 +1,127 @@
+open Block
+
+let debug = true
+
+(*干渉グラフは無向グラフ*)
+let igraph = ref Graph.empty
+(*CallDirの返り値*)
+let ret_nodes = ref S.empty
+(*CallDirの引数*)
+let arg_nodes = ref S.empty
+(*fundefの引数*)
+let funarg_nodes = ref S.empty
+(*転送命令の集合*)
+let move_insts = ref M.empty
+(*simplify用リスト*)
+let simplify_worklist = ref []
+(*凍結リスト*)
+let freeze_worklist : Id.t list ref = ref []
+(*spillのリスト*)
+let spill_worklist : Id.t list ref = ref []
+let worklist_moves : Id.t list ref = ref []
+(*彩色用スタック*)
+let select_stack : Id.t list ref = ref []
+(*合併されたノードの集合*)
+let coalesced_nodes = ref S.empty
+(*グラフの隣接情報*)
+let adjacent_info = ref M.empty
+(*グラフの次数情報*)
+let degree_info = ref M.empty
+
+let adjacent n = S.diff (M.find n !adjacent_info) (S.union (S.of_list !select_stack) !coalesced_nodes)
+let degree x = M.find x !degree_info
+
+let dec_degree x = 
+  adjacent x
+
+let push x list = list := x::!list
+let pop list = match !list with
+  |x::xs->list:= xs;x
+  |_->failwith "No Element\n"
+
+(*build*)
+
+let add_adjacent_info u v =
+  if u != v then
+    if M.mem u !adjacent_info then
+      let adj_u = M.find u !adjacent_info in
+      adjacent_info:= M.add u (S.add v adj_u) !adjacent_info
+    else
+      adjacent_info:= M.add u (S.singleton v) !adjacent_info
+  else
+    if M.mem u !adjacent_info then
+      ()
+    else
+      adjacent_info:= M.add u (S.empty) !adjacent_info
+	    
+let add_adj_clique nodes =
+  let rec a_a_c = function
+    |[n]-> add_adjacent_info n n
+    |n::ns-> List.iter (add_adjacent_info n) nodes;a_a_c ns
+    |_->() in
+  a_a_c nodes
+
+let is_move = function
+  |Mr _|FMov _-> true
+  |_->false
+
+let add_block_val blk =
+  (*block単位での生存情報を保持*)
+  igraph := Graph.add_clique (S.elements blk.s_liveout) !igraph;
+  igraph := M.fold (fun sid stmt graph-> 
+		    (*転送命令であれば点線と識別できるようにする*)
+		    if is_move stmt.inst then move_insts := M.add sid stmt !move_insts;
+		    (*干渉グラフに各命令の生存情報閥を追加*)
+add_adj_clique (S.elements stmt.v_liveout);
+		    Graph.add_clique (S.elements stmt.v_liveout) graph)
+		   blk.stmts !igraph
+
+		   
+let build fundef =
+  igraph := Graph.add_clique (fundef.args@fundef.fargs) Graph.empty;
+  let blks = List.rev (List.map snd (M.bindings fundef.blocks)) in
+  List.iter add_block_val blks;
+
+  if debug then
+  (Format.eprintf "%s@." (Id.string_L fundef.name);Graph.eprintf !igraph)
+    
+let make_worklist fundef = ()  
+
+(*その他、CallDirの返り値、CallDirの引数、仮引数の順にソートする*)
+let sort_for_simplify nodes =
+  let n2,n1 = List.partition (fun x-> S.mem x !ret_nodes) nodes in
+  let n3,n1 = List.partition (fun x-> S.mem x !arg_nodes) n1 in
+  let n4,n1 = List.partition (fun x-> S.mem x !funarg_nodes) n1 in
+  n1@n2@n3@n4
+		   
+let rec simplify () =
+  let n = pop simplify_worklist in
+  if degree n < List.length Asm.allregs then 
+    (push n select_stack; simplify ())
+
+let coalesce () = ()
+
+let freeze () = ()
+
+let spill () = ()
+
+let main fundef =
+  Liveness.f fundef;
+  initialize fundef;
+  build fundef;
+  make_worklist fundef;
+  while not (!simplify_worklist = [] && !worklist_moves = [] && !freeze_worklist = [] && !spill_worklist = []) do
+    if !simplify_worklist != [] then simplify ()
+    else if !worklist_moves != [] then coalesce ()
+    else if !freeze_worklist != [] then freeze ()
+    else if spill_worklist != [] then spill ()
+  done;
+  assign_colors ();
+  if !spilled_nodes != [] then
+    (rewrite_program !spilled_nodes;
+     main fundef)
+
+let f (Prog(fundefs,fundef)) =
+  List.fold_left (fun _ fundef-> main fundef) () fundefs;
+  main fundef;
+  Prog(fundefs, fundef)

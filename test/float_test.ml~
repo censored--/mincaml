@@ -1,0 +1,3 @@
+let rec f x y = x +. x *. y in
+    let x = read_float () in
+    f x 2.0

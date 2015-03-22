@@ -1,0 +1,1 @@
+print_char (int_of_float (sqrt 23.42))
